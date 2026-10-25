@@ -1,7 +1,7 @@
 # ------------- 简易版 知识库chatbot -------------
 # @Time: 2026/10/22
 # @Author: fan
-# version: 2.3 (纯净流式版)
+# version: 1.0
 # --------------------------------------------
 
 
@@ -14,6 +14,10 @@ import os
 import httpx
 import json
 import uvicorn
+import pypdf
+import docx
+import pandas as pd
+import io
 
 
 load_dotenv()
@@ -33,25 +37,65 @@ app.add_middleware(
 # 模拟数据库
 memorydb = ''
 
-class ChatRequste(BaseModel):
+class ChatRequest(BaseModel):
     prompt : str
 
-# ----------------- 上传文件 ----------------
+
+
+# =================== 解析文件函数 ================
+def parse_txt(file_bytes : bytes) -> str:
+    return file_bytes.decode('utf-8', errors = 'ignore')
+def parse_pdf(file_bytes : bytes) -> str:
+    load_pdf = pypdf.PdfReader(io.BytesIO(file_bytes))
+    text = ''
+    for page in load_pdf.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + '\n'
+    return text
+def parse_docx(file_bytes : bytes) -> str:
+    load_docx = docx.Document(io.BytesIO(file_bytes))
+    text = ''
+    for page in load_docx.paragraphs:
+        text += page.text + '\n'
+    return text
+# ================================================
+
+
+# ==================== 上传文件 ===================
 @app.post('/upload')
 async def upload(file : UploadFile = File(...)):
     global memorydb
-    if not file.filename.endswith('.txt'):
-        raise HTTPException(status_code = 400, detail = '目前仅支持 TXT 文件。')
-    text_b = await file.read()
-    try:
-        text_str = text_b.decode('utf-8')
-        memorydb = text_str
-        return {'msg' : '上传成功', 'words' : len(memorydb)}
-    except Exception:
-        raise HTTPException(status_code = 400, detail = '文件解析失败，请确保是 UTF-8 编码')
-# ------------------------------------------
+    filename = file.filename
+    extension = filename.split('.')[-1].lower()
 
-# -------------- 核心生成器 ----------------
+    ext = ['txt', 'docx', 'pdf']
+    if extension not in ext:
+        raise HTTPException(status_code = 400, detail = '目前仅支持 TXT、DOCX 和 PDF 文件。')
+
+    text_bytes = await file.read()
+    try:
+        if extension == 'txt':
+            text = parse_txt(text_bytes)
+        if extension == 'pdf':
+            text = parse_pdf(text_bytes)
+        if extension == 'docx':
+            text = parse_docx(text_bytes)
+    except Exception as e:
+        raise HTTPException(status_code = 400, detail = str(e))
+
+    text = '\n'.join([line for line in text.splitlines() if line.strip()])
+    memorydb = text  
+    if not text: 
+        raise HTTPException(status_code = 400, detail = '文件内容为空或无法提取文本。')
+    return {
+        'msg' : '上传成功',
+        'words' : len(text),
+        'text' : text[:200] + "..." if len(text) > 200 else text
+    }    
+# =================================================
+
+# =================== 核心生成器 ==================
 async def deepseek_event_generator(user_prompt: str):
     DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
     DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
@@ -99,22 +143,22 @@ async def deepseek_event_generator(user_prompt: str):
                             continue
     except Exception as e:
         yield f'data: [error] {str(e)}\n\n'
-#  ----------------------------------------
+#  ============================================
 
-# --------------- 接口路由 ---------------
+# ===================== 接口路由  ==================
 @app.post('/chat')
-async def chat(req: ChatRequste):
+async def chat(req: ChatRequest):
     return StreamingResponse(
         deepseek_event_generator(req.prompt), 
         media_type="text/event-stream"
     )
-# -----------------------------------------
+# ============================================
 
 
-# ------------------ 启动服务 -------------
+# ================== 启动服务 ===============
 if __name__ == '__main__':
     uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=True)
-# ---------------------------------------
+# ============================================
 
 
 
